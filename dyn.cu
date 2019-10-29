@@ -1,4 +1,5 @@
 #include <cstdio> 
+#include <future>
 
 #define NUMERIC_TYPE float
 #define C(x) x
@@ -16,15 +17,28 @@ __constant__ int xsz;
 __constant__ NUMERIC_TYPE end_time = C(1000.0);
 __managed__ bool finished = false;
 __managed__ NUMERIC_TYPE t = C(0.0);
-__device__ NUMERIC_TYPE next_snapshot_time = C(100.0);
+__device__ NUMERIC_TYPE next_snapshot_time = C(200.0);
+
+void write(NUMERIC_TYPE* snapshot, const int xsz, NUMERIC_TYPE t)
+{
+	char filename[256];
+	sprintf(filename, "results/%.3f.dat", t);
+	FILE* file = fopen(filename, "wb");
+	for (int i=0; i<xsz; i++)
+	{
+		fprintf(file, "%.1f\t", snapshot[i]);
+		if (i % 80 == 79) fprintf(file, "\n");
+	}
+	fclose(file);
+}
 
 __global__ void update_flow_variables(NUMERIC_TYPE* U) 
 { 
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
 
-	for (int i=global_i+1; i<xsz; i+=blockDim.x*gridDim.x)
+	for (int i=global_i; i<xsz; i+=blockDim.x*gridDim.x)
 	{
-		U[i] += C(0.25);
+		U[i] += C(0.1);
 	}
 } 
 
@@ -35,7 +49,7 @@ __global__ void simulate(NUMERIC_TYPE* U)
 
 	while (t < end_time && t < next_snapshot_time)
 	{
-    	update_flow_variables<<<64, 256>>>(U);
+    	update_flow_variables<<<256, 256>>>(U);
 		if (cudaDeviceSynchronize() != cudaSuccess) return;
 
 		t += dt;
@@ -48,7 +62,7 @@ __global__ void simulate(NUMERIC_TYPE* U)
 
 	if (t >= next_snapshot_time)
 	{
-		next_snapshot_time += C(100.0);
+		next_snapshot_time += C(200.0);
 		// TODO
 	}
 } 
@@ -68,16 +82,21 @@ int main(int argc, char *argv[])
 	checkCudaErrors(cudaMalloc(&current_solution_D, U_size));
 	checkCudaErrors(cudaMemcpy(current_solution_D, snapshot_H, U_size, cudaMemcpyHostToDevice));
 
+	auto future = std::async(std::launch::async, []{});
 	printf("HOST initialised\n");
 
 	while (!finished)
 	{
 		simulate<<<1,1>>>(current_solution_D); 
+		future.wait();
 		checkCudaErrors(cudaDeviceSynchronize());
 		checkCudaErrors(cudaMemcpy(snapshot_H, current_solution_D, U_size, cudaMemcpyDeviceToHost));
 		printf("HOST t=%f\n", t);
+		const int t_H = t;
+		future = std::async(std::launch::async, [&]{write(snapshot_H, xsz_H, t_H);});
 	}
 
+	future.wait();
 	checkCudaErrors(cudaFreeHost(snapshot_H));
 	checkCudaErrors(cudaFree(current_solution_D));
 
